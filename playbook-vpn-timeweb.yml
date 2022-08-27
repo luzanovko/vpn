@@ -1,0 +1,238 @@
+---
+
+- hosts: vpn
+  become: yes
+  gather_facts: no
+  tasks:
+#    - name: Update all apt packages
+#      apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+    - name: OpenVPN | Install package
+      apt: name=openvpn state=present update-cache=false
+    - name: Easy-RSA | Install package
+      apt: name=easy-rsa state=present update-cache=false
+    - name: iptables-persistent | Install package
+      apt: name=iptables-persistent state=present update-cache=false
+#    - name: net-tools | Install package
+#      apt: name=net-tools state=present update-cache=false
+
+    - name: "OpenVPN | Enable IPv4 farwsrdig"
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+        ignoreerrors: true
+      failed_when: false
+
+    - name: "OpenVPN | Enable IPTables NAT Chain"
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        jump: MASQUERADE
+        protocol: all
+        source: '0.0.0.0/0'
+        destination: '0.0.0.0/0'
+        comment: Ansible NAT Masqurade
+      become: true
+    - name: "OpenVPN | ensure /etc/openvpn/easyrsa exists"
+      file:
+         path: "/user/share/easy-rsa"
+         state: directory
+         mode: 0755
+
+    - name: "OpenVPN | create vars file"
+      copy:
+        dest: "/user/share/easy-rsa/vars"
+        content: |
+          set_var EASYRSA_ALGO "ec"
+          set_var EASYRSA_DIGEST "sha512"
+
+    - name: "OpenVPN | create directory"
+      file:
+        path: /etc/openvpn/easy-rsa
+        state: directory
+
+    - name: "OpenVPN | easy-rsa init-pki"
+      command:
+        cmd: "/usr/share/easy-rsa/easyrsa init-pki"
+        chdir: "/etc/openvpn/easy-rsa"
+        creates: "/etc/openvpn/easy-rsa/pki"
+
+    - name: "OpenVPN | easy-rsa build-ca"
+      command:
+        cmd: '/usr/share/easy-rsa/easyrsa build-ca nopass'
+        chdir: '/etc/openvpn/easy-rsa'
+        creates: '/etc/openvpn/easy-rsa/pki/ca.crt'
+      environment:
+        EASYRSA_BATCH: yes 
+
+    - name: "OpenVPN | easy-rsa gen-dh"
+      command:
+        cmd: '/usr/share/easy-rsa/easyrsa gen-dh'
+        chdir: '/etc/openvpn/easy-rsa'
+        creates: '/etc/openvpn/easy-rsa/pki/dh.pem'
+
+    - name: "OpenVPN | easy-rsa server nopass"
+      command:
+        cmd: '/usr/share/easy-rsa/easyrsa build-server-full server nopass'
+        chdir: '/etc/openvpn/easy-rsa'
+        creates: '/etc/openvpn/easy-rsa/pki/issued/server.crt'
+
+    - name: "OpenVPN | easy-rsa client nopass"
+      command:
+        cmd: '/usr/share/easy-rsa/easyrsa build-client-full client01 nopass'
+        chdir: '/etc/openvpn/easy-rsa'
+        creates: '/etc/openvpn/easy-rsa/pki/issued/client01.crt'
+
+    - name: "OpenVPN | easy-rsa gen-crl"
+      command:
+        cmd: '/usr/share/easy-rsa/easyrsa gen-crl'
+        chdir: '/etc/openvpn/easy-rsa'
+        creates: '/etc/openvpn/easy-rsa/pki/crl.pem'
+
+    - name: "OpenVPN | openvpn genkey"
+      command:
+        cmd: 'openvpn --genkey --secret /etc/openvpn/easy-rsa/pki/ta.key'
+        creates: '/etc/openvpn/easy-rsa/pki/ta.key'
+
+    - name: "OpenVPN | create directory"
+      file:
+        path: /etc/openvpn/server/issued
+        state: directory
+
+    - name: "OpenVPN | ensure /etc/openvpn/server/private exists"
+      file:
+         path: "/etc/openvpn/server/private"
+         state: directory
+         mode: 0755
+
+    - name: "OpenVPN | copy files to /etc/openvpn/server"
+      copy:
+        src: "/etc/openvpn/easy-rsa/pki/{{ item }}"
+        dest: "/etc/openvpn/server/{{ item }}"
+        mode: 0644
+        remote_src: true
+      loop:
+        - ca.crt
+        - dh.pem
+        - ta.key
+        - private/ca.key
+        - private/server.key
+        - issued/server.crt
+
+    - name: "OpenVPN | copy files to /etc/openvpn/"
+      copy:
+        src: "/etc/openvpn/easy-rsa/pki/{{ item }}"
+        dest: "/etc/openvpn/{{ item }}"
+        mode: 0644
+        remote_src: true
+      loop:
+        - ca.crt
+        - ta.key
+
+    - name: "OpenVPN | place server.conf"
+      copy:
+        src: ./files/server.conf.j2
+        dest: /etc/openvpn/server.conf
+        mode: 0644
+        owner: root
+        group: root
+
+    - name: "restart OpenVPN"
+      systemd: name=openvpn state=restarted
+
+    - name: "OpenVPN | copy client-crt files to /etc/openvpn/server"
+      copy:
+        src: "/etc/openvpn/easy-rsa/pki/issued/{{ item }}"
+        dest: "/etc/openvpn/server/{{ item }}"
+        mode: 0644
+        remote_src: true
+      with_items:
+        - client01.crt
+
+    - name: "OpenVPN | copy client-key files to /etc/openvpn/server"
+      copy:
+        src: "/etc/openvpn/easy-rsa/pki/private/{{ item }}"
+        dest: "/etc/openvpn/server/{{ item }}"
+        mode: 0644
+        remote_src: true
+      with_items:
+        - client01.key
+        
+    - name: "OpenVPN | ensure /etc/openvpn/users exists"
+      file:
+         path: "/etc/openvpn/users"
+         state: directory
+         mode: 0755
+
+    - name: "OpenVPN | copy files to /etc/openvpn/users"
+      copy:
+        src: "/etc/openvpn/easy-rsa/pki/{{ item }}"
+        dest: "/etc/openvpn/users/{{ item }}"
+        mode: 0644
+        remote_src: true
+      loop:
+        - ca.crt
+        - ta.key
+
+    - name: "OpenVPN | copy client-crt files to /etc/openvpn/users"
+      copy:
+        src: "/etc/openvpn/easy-rsa/pki/issued/{{ item }}"
+        dest: "/etc/openvpn/users/{{ item }}"
+        mode: 0644
+        remote_src: true
+      with_items:
+        - "client01.crt"
+
+    - name: "OpenVPN | copy client-key files to /etc/openvpn/server"
+      copy:
+        src: "/etc/openvpn/easy-rsa/pki/private/{{ item }}"
+        dest: "/etc/openvpn/users/{{ item }}"
+        mode: 0644
+        remote_src: true
+      with_items:
+        - "client01.key"
+
+    - name: "OpenVPN | Register ca.crt"
+      slurp:
+        src: /etc/openvpn/ca.crt
+      register: openvpn_ca_cert
+
+    - name: OpenVPN | Register ta.key
+      slurp:
+        src: /etc/openvpn/ta.key
+      register: openvpn_tls_auth
+
+    - name: "OpenVPN | Register client.certs"
+      slurp:
+        src: "/etc/openvpn/users/{{ item }}.crt"
+      with_items:
+        - client01
+      register: openvpn_client_certs
+
+    - name: "OpenVPN | Register client.keys"
+      slurp:
+        src: "/etc/openvpn/users/{{ item }}.key"
+      with_items:
+        - client01
+      register: openvpn_client_key
+
+    - name: "OpenVPN | Generate client config"
+      copy:
+        src: ./files/client.ovpn.j2
+        dest: "/etc/openvpn/users/{{ item.0.item }}-{{ inventory_hostname }}.ovpn"
+        mode: 0400
+        owner: root
+        group: root
+      with_together:
+        - "{{ openvpn_client_certs.results }}"
+        - "{{ openvpn_client_key.results }}"
+
+    - name: Fetch client config
+      fetch:
+        src: "/etc/openvpn/users/{{ item }}-{{ inventory_hostname }}.ovpn"
+        dest: "{{ playbook_dir }}/ovpn/{{ inventory_hostname }} - {{ item }}.ovpn"
+        flat: true
+      with_items:
+        - client01
